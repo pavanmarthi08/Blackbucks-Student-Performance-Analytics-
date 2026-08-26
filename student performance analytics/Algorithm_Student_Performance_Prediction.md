@@ -432,6 +432,207 @@ datasets in the thousands-of-rows range used by this project.
 
 ---
 
+## 6. Application/Dashboard Algorithm (`app.py`)
+**Purpose:** Serve the entire system as an interactive multi-page Streamlit
+web application, wiring the data, analysis, and prediction modules into a
+single user-facing tool.
+
+```
+ALGORITHM RunDashboard()
+    Configure page (title, icon, wide layout) and inject custom CSS for KPI cards
+
+    df ← cached(LoadOrGenerateData("data/student_performance.csv"))
+    TRY:
+        model ← LoadModel("models/student_performance_model.pkl")
+        model_loaded ← True
+    CATCH FileNotFoundError:
+        model_loaded ← False
+
+    page ← sidebar radio selection from:
+        [Overview, Student Analysis, Performance Analysis,
+         At-Risk Student Analysis, Performance Prediction]
+
+    SWITCH page:
+        CASE "Overview":          RenderOverviewPage(df, model, model_loaded)
+        CASE "Student Analysis":  RenderStudentAnalysisPage(df)
+        CASE "Performance Analysis": RenderPerformanceAnalysisPage(df)
+        CASE "At-Risk Student Analysis": RenderAtRiskPage(df)
+        CASE "Performance Prediction": RenderPredictionPage(model, model_loaded)
+END
+```
+
+### 6.1 Caching Strategy
+`load_data()` is wrapped in `@st.cache_data`, so the (potentially expensive)
+data loading/generation step runs only once per session rather than on every
+widget interaction — Streamlit reruns the entire script top-to-bottom on
+every user action (slider drag, button click, page switch), so caching the
+data load is essential to keep the app responsive. The model is *not*
+decorated with `@st.cache_resource` in the current code, meaning
+`load_model()` re-executes its candidate-path search on every rerun; this is
+cheap (a few `os.path.exists` checks plus one `joblib.load` the first time
+it succeeds) but would be a natural optimization target for a larger model
+file.
+
+### 6.2 Page 1 — Overview
+```
+ALGORITHM RenderOverviewPage(df, model, model_loaded)
+    kpis ← GetKPIs(df)
+    Render 6 KPI cards in a 3-column grid (Total Students, Avg/Min/Max Score,
+        Avg Attendance, At-Risk Count) using styled HTML cards
+
+    Render histogram of Exam_Score (distribution shape + KDE overlay)
+    Render boxplot of Exam_Score grouped by Motivation_Level (Low/Medium/High)
+
+    IF model_loaded:
+        importance_df ← ExtractFeatureImportance(model)
+        IF importance_df not empty:
+            Render horizontal bar chart of top-5 feature importances
+            Display the single top feature as a natural-language "Key Insight"
+END
+```
+This page acts as an **executive summary**: it answers "how is the cohort
+doing overall?" in one screen, and — only if a trained model is present —
+augments the human-authored insight with a data-driven explanation of what
+actually drives scores, sourced directly from the Random Forest's learned
+`feature_importances_`.
+
+### 6.3 Page 2 — Student Analysis
+```
+ALGORITHM RenderStudentAnalysisPage(df)
+    Collect filter widgets: Gender, Motivation_Level, Tutoring, Family_Income
+        (multiselects) and Attendance_Rate, Study_Hours_per_Week (range sliders)
+
+    filtered_df ← df rows matching ALL filter conditions simultaneously
+                  (logical AND across every selected filter)
+
+    Display filtered row count and a preview table (first 50 rows)
+
+    IF filtered_df not empty:
+        Render bar chart: average Exam_Score grouped by Gender
+        Render KDE plot: Exam_Score distribution split by Tutoring status
+END
+```
+This is a **drill-down / segmentation tool**: rather than fixed aggregate
+KPIs, the user can interactively slice the cohort (e.g., "low-income
+students who receive tutoring") and immediately see how that segment's score
+distribution and gender breakdown differ from the whole population. The
+empty-check guards (`if not filtered_df.empty`) prevent chart-rendering
+errors when a filter combination matches zero students.
+
+### 6.4 Page 3 — Performance Analysis
+```
+ALGORITHM RenderPerformanceAnalysisPage(df)
+    Render scatter + regression line: Attendance_Rate vs Exam_Score
+    Render scatter + regression line: Study_Hours_per_Week vs Exam_Score
+    corr_matrix ← GetCorrelationMatrix(df)
+    Render annotated heatmap of corr_matrix
+    Display a static textual insight about the strongest correlated features
+END
+```
+This page is the **exploratory data analysis (EDA)** view: it visually
+substantiates two of the strongest engineered relationships in the synthetic
+data (attendance and study hours both feed directly into `Exam_Score`) via
+scatter plots with fitted regression lines, then generalizes with a full
+correlation heatmap so any other numeric relationship can be inspected too.
+
+### 6.5 Page 4 — At-Risk Student Analysis
+```
+ALGORITHM RenderAtRiskPage(df)
+    risk_counts ← GetRiskDistribution(copy of df)
+    Render pie chart of risk_counts (High/Medium/Low, fixed color mapping:
+        red/yellow/green)
+
+    df['Risk'] ← "High Risk" if Exam_Score < 60 else "Not High Risk"
+    Render 3 side-by-side bar charts comparing High-Risk vs Not-High-Risk
+        groups on: Attendance_Rate, Study_Hours_per_Week, Sleep_Hours_per_Night
+
+    Display disclaimer: classification supports early intervention,
+        not formal diagnosis
+
+    high_risk_df ← rows where Exam_Score < 60, sorted ascending by score
+    Display table of the 10 lowest-scoring at-risk students
+END
+```
+This page operationalizes the risk taxonomy for **intervention planning**:
+beyond just counting at-risk students, it contrasts their behavioral profile
+(attendance, study time, sleep) against the rest of the cohort side by side,
+which visually surfaces *which* behavioral factors most separate at-risk
+students from their peers — and surfaces a ranked worklist (lowest scorers
+first) for staff to prioritize outreach.
+
+### 6.6 Page 5 — Performance Prediction
+```
+ALGORITHM RenderPredictionPage(model, model_loaded)
+    IF NOT model_loaded:
+        Show error instructing user to run model_training.py first
+        RETURN
+
+    Render a form with 16 input widgets across 3 columns, covering every
+        feature the model expects (age, gender, attendance, study hours,
+        previous score, assignment performance, sleep, motivation,
+        parental involvement, income, distance, internet, tutoring,
+        extracurriculars, learning difficulties, academic support)
+
+    ON form submit:
+        input_data ← dict assembled from all 16 widget values
+        score, risk, recommendations ← PredictPerformance(model, input_data)
+
+        Display predicted score as a metric
+        Display risk badge (colored error/warning/success by risk tier)
+        Display bullet list of stage-appropriate recommendations
+
+        // Rule-based explanation layer, independent of the model itself:
+        factors ← []
+        IF attendance < 75:            factors.append("low attendance" note)
+        IF study_hours < 10:           factors.append("below-average study hours" note)
+        IF previous_score > 80:        factors.append("strong prior performance" note)
+        ELSE IF previous_score < 60:   factors.append("weak prior performance" note)
+        IF sleep < 6 OR sleep > 9:     factors.append("sub-optimal sleep" note)
+        IF learning_diff = Yes AND support = No:
+                                        factors.append("unsupported learning difficulty" note)
+        IF factors is empty:           factors ← ["Overall profile is balanced."]
+
+        Display each factor as an info callout
+END
+```
+
+### 6.7 The Two-Layer Explanation Design
+A notable design pattern on this page is that **two independent explanation
+mechanisms** are shown together:
+1. **Model-driven risk tier and recommendations** — purely a function of the
+   single predicted `score` number, via fixed thresholds (60/75) baked into
+   `predict_performance`.
+2. **Rule-based "major factors" callouts** — a separate, hand-written set of
+   `if/elif` checks directly on the *raw input values* the user typed in,
+   completely independent of the trained model's internal logic.
+
+This second layer exists because a Random Forest's actual decision path for
+a single prediction is not naturally human-readable in real time; the
+hand-authored heuristics give users an immediately understandable,
+plausible-sounding explanation ("low attendance is hurting your score")
+without requiring a full SHAP/LIME-style model-explainability integration.
+The trade-off is that these rule-based factors are **not guaranteed to match
+the model's actual reasoning** for that specific prediction — they are a
+reasonable proxy based on domain knowledge of how the data was generated,
+not a faithful decomposition of the model's decision.
+
+### 6.8 State and Control Flow Notes
+- Streamlit's execution model reruns the whole script on every interaction,
+  so all page logic is written as straight-line procedural code guarded by
+  `if/elif` on the sidebar selection — there is no persistent server-side
+  session state beyond what `st.cache_data` retains.
+- The prediction form uses `st.form(...)` specifically so that none of the
+  16 widget changes trigger a rerun/prediction individually — only the
+  final "Predict Performance" submit button does, batching all inputs into
+  a single `predict_performance` call.
+- Graceful degradation: if no trained model exists yet, the Overview page
+  simply omits the feature-importance section, and the Prediction page
+  replaces its form entirely with an instructional error — the rest of the
+  dashboard (Overview KPIs/charts, Student Analysis, Performance Analysis,
+  At-Risk Analysis) works from `df` alone and needs no model at all.
+
+---
+
 ## End-to-End Pipeline Summary
 
 ```
@@ -440,13 +641,19 @@ datasets in the thousands-of-rows range used by this project.
 3. TRAIN       → TrainAndEvaluate()              → best model (Random Forest) saved as .pkl
 4. PREDICT     → PredictPerformance()            → score, risk category, recommendations
 5. ANALYZE     → GetKPIs / GetCorrelationMatrix / GetRiskDistribution → dashboard insights
+6. SERVE       → app.py (Streamlit)              → 5-page interactive dashboard tying 1–5 together
 ```
 
 **Key design choices:**
 - Random Forest is selected as the production model regardless of comparative
   metrics (fixed choice in code), though Linear Regression and Gradient Boosting
   are trained and evaluated alongside it for comparison.
-- Risk thresholds (60 / 75) are used consistently across analysis and prediction
-  to ensure dashboard and per-student predictions align.
+- Risk thresholds (60 / 75) are used consistently across analysis, prediction,
+  and the dashboard's At-Risk page to ensure they always align.
 - Missing values are handled via median (numeric) / most-frequent (categorical)
   imputation inside the pipeline, so raw missing data does not need pre-cleaning.
+- The dashboard is designed to degrade gracefully when no trained model is
+  present, keeping all data-driven (non-ML) pages fully functional.
+- The prediction page pairs true model output (score/risk/recommendations)
+  with an independent, hand-authored rule-based explanation layer, trading
+  perfect faithfulness to the model's internals for immediate interpretability.
